@@ -55,11 +55,11 @@ Requirements: Android NDK (r30 tested), CMake, and Android Studio or the Android
 
 ```
 git clone --recurse-submodules https://github.com/MonadoArt/Quest-Pro-Camera-Network-Relay.git
-powershell -ExecutionPolicy Bypass -File build.ps1          # release APK
-powershell -ExecutionPolicy Bypass -File build.ps1 -Debug   # debug APK
 ```
 
-`native/build.ps1` builds the camera daemon (libjpeg-turbo linked statically), the streamer and the injector; Gradle packs them into the APK. Set `ANDROID_NDK_HOME` if the NDK is not at the path in the script.
+Then double-click **Build Release.bat**. It finds Java, builds everything and opens the `release` folder with `QuestProCameraService.apk` and its SHA-256 (full log in `release\build.log`). Android Studio's Build button and `gradlew assembleDebug` / `assembleRelease` work too.
+
+Every APK build first runs `native/build.ps1` (skipped when the native sources are unchanged), which builds the camera daemon (libjpeg-turbo linked statically), the streamers and the injector. It finds the NDK and CMake in the Android SDK; set `ANDROID_NDK_HOME` to use a different NDK.
 
 Release builds are signed with your local Android debug key, so your own builds update each other but not the official releases. To sign with a different key, create `keystore.properties` in the repo root (it is git-ignored):
 

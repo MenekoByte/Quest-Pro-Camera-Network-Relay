@@ -24,3 +24,6 @@ keystore.properties
 
 # IDE
 /.idea/
+
+# Output of "Build Release.bat"
+/release

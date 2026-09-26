@@ -12,7 +12,23 @@ val keystoreProperties = Properties().apply {
     if (file.isFile) file.inputStream().use { stream -> load(stream) }
 }
 
+// Builds the headset binaries (daemon, streamers, injector) with native/build.ps1
+// before every APK build, so Android Studio's Build button and gradlew need no
+// separate step. Skipped when native sources are unchanged.
+val buildQproNative by tasks.registering(Exec::class) {
+    val nativeDir = rootProject.file("native")
+    inputs.files(fileTree(nativeDir) { include("daemon/**", "streamer/**", "build.ps1") })
+    outputs.files(
+        nativeDir.resolve("build/android/qpro-camd"),
+        nativeDir.resolve("build/android/questpro-camera-injector"),
+        nativeDir.resolve("build/android/libquestpro-camera-streamer-v12.so")
+    )
+    onlyIf { System.getProperty("os.name").startsWith("Windows") }
+    commandLine("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", nativeDir.resolve("build.ps1").absolutePath)
+}
+
 val stageQproNativeLibraries by tasks.registering(Copy::class) {
+    dependsOn(buildQproNative)
     val nativeBuildDir = rootProject.file("native/build/android")
     val daemon = nativeBuildDir.resolve("qpro-camd")
     val injector = nativeBuildDir.resolve("questpro-camera-injector")

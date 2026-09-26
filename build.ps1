@@ -1,12 +1,11 @@
 param(
     [switch]$Debug
 )
-# Builds the native headset binaries, then the APK.
+# Builds the APK; Gradle builds the native headset binaries first (native/build.ps1).
 # Release output: app\build\outputs\apk\release\app-release.apk (signed if keystore.properties exists)
+# For a ready-to-publish APK with its checksum, double-click "Build Release.bat" instead.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'native\build.ps1')
-if ($LASTEXITCODE -ne 0) { throw "Native build failed: $LASTEXITCODE" }
 $task = 'assembleRelease'
 if ($Debug) { $task = 'assembleDebug' }
 Push-Location $root

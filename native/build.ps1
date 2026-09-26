@@ -8,10 +8,39 @@ param(
 #   build/android/libquestpro-camera-streamer-v12.so  camera buffer handoff (what the app injects)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
-if ([string]::IsNullOrWhiteSpace($cmake)) { $cmake = 'E:\Program Files\CMake\bin\cmake.exe' }
+
+# Android SDK: local.properties sdk.dir, then ANDROID_HOME / ANDROID_SDK_ROOT, then Android Studio's default.
+$sdk = $null
+$localProperties = Join-Path (Split-Path -Parent $root) 'local.properties'
+if (Test-Path -LiteralPath $localProperties) {
+    $line = Select-String -LiteralPath $localProperties -Pattern '^sdk\.dir=(.+)$' | Select-Object -First 1
+    if ($line) { $sdk = $line.Matches[0].Groups[1].Value -replace '\\:', ':' -replace '\\\\', '\' }
+}
+foreach ($candidate in @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, (Join-Path $env:LOCALAPPDATA 'Android\Sdk'))) {
+    if (-not $sdk -and $candidate -and (Test-Path -LiteralPath $candidate)) { $sdk = $candidate }
+}
+
+# NDK: ANDROID_NDK_HOME, else the newest NDK installed in the SDK, else the old fixed path.
 $ndk = $env:ANDROID_NDK_HOME
+if ([string]::IsNullOrWhiteSpace($ndk) -and $sdk -and (Test-Path -LiteralPath (Join-Path $sdk 'ndk'))) {
+    $newest = Get-ChildItem -LiteralPath (Join-Path $sdk 'ndk') -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'build\cmake\android.toolchain.cmake') } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($newest) { $ndk = $newest.FullName }
+}
 if ([string]::IsNullOrWhiteSpace($ndk)) { $ndk = 'E:\SDKs\Android\android-ndk-r30' }
+
+# CMake: PATH, else the SDK's CMake, else the usual install folders.
+$cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
+if ([string]::IsNullOrWhiteSpace($cmake) -and $sdk -and (Test-Path -LiteralPath (Join-Path $sdk 'cmake'))) {
+    $sdkCmake = Get-ChildItem -LiteralPath (Join-Path $sdk 'cmake') -Directory | Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName 'bin\cmake.exe' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($sdkCmake) { $cmake = $sdkCmake }
+}
+foreach ($candidate in @('C:\Program Files\CMake\bin\cmake.exe', 'E:\Program Files\CMake\bin\cmake.exe')) {
+    if ([string]::IsNullOrWhiteSpace($cmake) -and (Test-Path -LiteralPath $candidate)) { $cmake = $candidate }
+}
+if ([string]::IsNullOrWhiteSpace($cmake)) { Write-Error 'CMake not found: install it (cmake.org) or through Android Studio SDK Manager > SDK Tools > CMake'; exit 1 }
 $clang = Join-Path $ndk 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe'
 $make = Join-Path $ndk 'prebuilt\windows-x86_64\bin\make.exe'
 $toolchain = Join-Path $ndk 'build\cmake\android.toolchain.cmake'
@@ -21,7 +50,7 @@ $outDir = Join-Path $root 'build\android'
 $output = Join-Path $outDir 'qpro-camd'
 if ([string]::IsNullOrWhiteSpace($SourceFile)) { $SourceFile = Join-Path $root 'daemon\qpro_camd.c' }
 try {
-    if (-not (Test-Path -LiteralPath $clang)) { throw "NDK clang not found: $clang (set ANDROID_NDK_HOME)" }
+    if (-not (Test-Path -LiteralPath $clang)) { throw "Android NDK not found (looked in $ndk): install it in Android Studio SDK Manager > SDK Tools > NDK, or set ANDROID_NDK_HOME" }
     if (-not (Test-Path -LiteralPath (Join-Path $source 'CMakeLists.txt'))) { throw "libjpeg-turbo submodule missing: run git submodule update --init" }
     New-Item -ItemType Directory -Force -Path $libBuild | Out-Null
     & $cmake -S $source -B $libBuild -G 'Unix Makefiles' "-DCMAKE_MAKE_PROGRAM=$make" '-DANDROID_ABI=arm64-v8a' '-DANDROID_PLATFORM=android-28' '-DANDROID_TOOLCHAIN=clang' '-DCMAKE_ASM_FLAGS=--target=aarch64-linux-android28' "-DCMAKE_TOOLCHAIN_FILE=$toolchain" '-DCMAKE_BUILD_TYPE=Release' '-DENABLE_SHARED=OFF' '-DENABLE_STATIC=ON' '-DWITH_TURBOJPEG=ON' '-DWITH_TOOLS=OFF' '-DWITH_TESTS=OFF'
