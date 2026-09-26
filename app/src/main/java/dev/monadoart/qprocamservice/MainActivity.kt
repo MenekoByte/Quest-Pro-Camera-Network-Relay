@@ -1,5 +1,6 @@
 package dev.monadoart.qprocamservice
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -34,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -67,6 +69,10 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
     var actionInProgress by remember { mutableStateOf(false) }
     var actionLog by remember { mutableStateOf("") }
     var lanIp by remember { mutableStateOf<String?>(null) }
+    // Per-model Start/Stop, remembered across app and daemon restarts.
+    val prefs = LocalContext.current.getSharedPreferences("models", Context.MODE_PRIVATE)
+    var tongueEnabled by remember { mutableStateOf(prefs.getBoolean("tongue", true)) }
+    var pupilEnabled by remember { mutableStateOf(prefs.getBoolean("pupil", true)) }
 
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -109,7 +115,7 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
                     scope.launch {
                         actionInProgress = true
                         try {
-                            val result = if (running) controller.stop() else controller.start()
+                            val result = if (running) controller.stop() else controller.start(tongueEnabled, pupilEnabled)
                             actionLog = result.log.takeLast(4000)
                             // Refresh now instead of waiting for the next poll.
                             status = StatusClient.fetch()
@@ -160,12 +166,49 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Onboard models", style = MaterialTheme.typography.titleMedium)
+                listOf(
+                    Triple("tongue", "Tongue", tongueEnabled),
+                    Triple("pupil", "Pupil", pupilEnabled)
+                ).forEach { (key, label, enabled) ->
+                    val stat = if (key == "tongue") status?.tongue else status?.pupil
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            colors = if (enabled) ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError
+                            ) else ButtonDefaults.buttonColors(),
+                            onClick = {
+                                val next = !enabled
+                                prefs.edit().putBoolean(key, next).apply()
+                                if (key == "tongue") tongueEnabled = next else pupilEnabled = next
+                                // Applies now if the service runs; otherwise at the next Start.
+                                scope.launch {
+                                    if (running) ModelControl.set(key, next)
+                                    status = StatusClient.fetch()
+                                }
+                            }
+                        ) { Text(if (enabled) "Stop" else "Start") }
+                        Text("$label: ${if (!enabled) "stopped" else stat?.let { modelText(it) } ?: "starts with the service"}")
+                    }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Stream URLs", style = MaterialTheme.typography.titleMedium)
                 if (lanIp == null) {
                     Text("Not connected to Wi-Fi")
                 } else {
                     Text("http://$lanIp:27280/camera2.mjpg", fontFamily = FontFamily.Monospace)
+                    Text("Tongue output (onboard, NDJSON): http://$lanIp:27280/tongue", fontFamily = FontFamily.Monospace)
+                    Text("Pupil output (onboard, NDJSON): http://$lanIp:27280/pupil", fontFamily = FontFamily.Monospace)
                     Text("Other endpoints:", style = MaterialTheme.typography.titleSmall)
                     listOf(
                         "/camera0.mjpg", "/camera1.mjpg", "/camera3.mjpg", "/camera4.mjpg",
@@ -213,3 +256,9 @@ private fun streamName(index: Int): String = when (index) {
 }
 
 private fun format(value: Double): String = String.format(java.util.Locale.US, "%.1f", value)
+
+private fun modelText(model: ModelStat): String = when {
+    !model.loaded -> "not loaded${model.error?.let { " ($it)" } ?: ""}"
+    model.subscribers == 0 -> "loaded, idle (no client connected)"
+    else -> "running for ${model.subscribers} client(s), ${format(model.meanTotalMs)} ms per result (${model.results} results)"
+}

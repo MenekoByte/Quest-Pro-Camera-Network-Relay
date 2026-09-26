@@ -16,6 +16,16 @@ data class StreamStat(
     val meanEncodeMs: Double
 )
 
+data class ModelStat(
+    val enabled: Boolean,
+    val loaded: Boolean,
+    val error: String?,
+    val subscribers: Int,
+    val results: Long,
+    val meanTotalMs: Double,
+    val meanHtaMs: Double
+)
+
 data class DaemonStatus(
     val version: String?,
     val sourceState: String,
@@ -25,6 +35,8 @@ data class DaemonStatus(
     val readFps: Double?,
     val meanFrameAgeMs: Double?,
     val streams: List<StreamStat>,
+    val tongue: ModelStat?,
+    val pupil: ModelStat?,
     val raw: String
 )
 
@@ -65,6 +77,19 @@ object StatusClient {
                 )
             }
 
+            // Onboard HTA models; absent in daemons older than 0.5.0.
+            fun model(key: String): ModelStat? = root.optJSONObject(key)?.let {
+                ModelStat(
+                    enabled = it.optBoolean("enabled", true),
+                    loaded = it.optBoolean("loaded"),
+                    error = it.optString("error").takeUnless { e -> e == "" || e == "null" },
+                    subscribers = it.optInt("subscribers"),
+                    results = it.optLong("results"),
+                    meanTotalMs = it.optDouble("mean_total_ms", 0.0),
+                    meanHtaMs = it.optDouble("mean_hta_ms", 0.0)
+                )
+            }
+
             DaemonStatus(
                 version = root.optString("version").takeUnless { it == "" || it == "null" },
                 sourceState = source?.optString("state")?.takeUnless { it == "" || it == "null" } ?: "unknown",
@@ -74,10 +99,30 @@ object StatusClient {
                 readFps = nullableDouble(input, "frames_read_per_second"),
                 meanFrameAgeMs = nullableDouble(input, "mean_frame_age_ms"),
                 streams = streamStats,
+                tongue = model("tongue"),
+                pupil = model("pupil"),
                 raw = body
             )
         } catch (_: Exception) {
             null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+}
+
+object ModelControl {
+    /** Starts or stops one onboard model in the running daemon (localhost-only /control). */
+    suspend fun set(model: String, enabled: Boolean, port: Int = 27280): Boolean = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
+        try {
+            val value = if (enabled) 1 else 0
+            connection = URL("http://127.0.0.1:$port/control?$model=$value").openConnection() as HttpURLConnection
+            connection.connectTimeout = 800
+            connection.readTimeout = 800
+            connection.responseCode == HttpURLConnection.HTTP_OK
+        } catch (_: Exception) {
+            false
         } finally {
             connection?.disconnect()
         }

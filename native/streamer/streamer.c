@@ -22,8 +22,8 @@
 #define FRAME_COUNTER_OFFSET (SENSOR_BYTES + (size_t)24)
 #define FACE_X 800
 #define MAX_CAMERA_MAPS 16
-#define LOG_PATH "/data/local/tmp/questpro-live-v8.log"
-#define SHARED_PATH "/data/local/tmp/questpro-live-v8-shared.bin"
+#define LOG_PATH "/data/local/tmp/questpro-live-v9.log"
+#define SHARED_PATH "/data/local/tmp/questpro-live-v9-shared.bin"
 #define SHARED_HEADER_BYTES ((size_t)80)
 #define SHARED_BYTES (SHARED_HEADER_BYTES + SENSOR_BYTES)
 #define SHARED_TORN_COUNT_OFFSET ((size_t)56)
@@ -70,7 +70,9 @@ static int compare_map_address(const void *left, const void *right) {
     return a->address < b->address ? -1 : a->address > b->address;
 }
 
-static int discover_camera_maps(void) {
+static int discover_camera_maps(int initial) {
+    CameraMap discovered[MAX_CAMERA_MAPS];
+    size_t discovered_count = 0;
     FILE *maps = fopen("/proc/self/maps", "r");
     if (!maps) return 0;
     char line[1024];
@@ -91,15 +93,24 @@ static int discover_camera_maps(void) {
         char *path = line + path_offset;
         while (*path == ' ' || *path == '\t') ++path;
         if (!strstr(path, "/dmabuf:dmabuf")) continue;
-        if (g_map_count >= MAX_CAMERA_MAPS) {
-            fclose(maps);
-            return 0;
+        if (discovered_count >= MAX_CAMERA_MAPS) {
+            /* More candidates than expected: keep none rather than guess. */
+            discovered_count = 0;
+            break;
         }
-        g_maps[g_map_count++].address = (uint8_t *)(uintptr_t)start;
+        discovered[discovered_count++].address = (uint8_t *)(uintptr_t)start;
     }
     fclose(maps);
-    qsort(g_maps, g_map_count, sizeof(g_maps[0]), compare_map_address);
-    return g_map_count == 9;
+    qsort(discovered, discovered_count, sizeof(discovered[0]), compare_map_address);
+    int changed = discovered_count != g_map_count;
+    size_t compare_count = discovered_count < g_map_count ? discovered_count : g_map_count;
+    for (size_t i = 0; i < compare_count; ++i)
+        if (discovered[i].address != g_maps[i].address) changed = 1;
+    memcpy(g_maps, discovered, discovered_count * sizeof(discovered[0]));
+    g_map_count = discovered_count;
+    if (!initial)
+        log_line("MAP_REDISCOVERY count=%zu changed=%d", g_map_count, changed);
+    return initial ? g_map_count == 9 : g_map_count >= 1;
 }
 
 static uint32_t frame_counter(const CameraMap *map) {
@@ -169,11 +180,21 @@ static void publish_torn_count(uint8_t *shared, uint64_t count) {
     __atomic_store_n(value, count, __ATOMIC_RELEASE);
 }
 
+static uint64_t g_last_invalid_lease_log;
+
 static int capture_is_requested(const uint8_t *shared) {
     const uint64_t *active_until = (const uint64_t *)(const void *)(
         shared + SHARED_ACTIVE_UNTIL_OFFSET);
-    return __atomic_load_n(active_until, __ATOMIC_ACQUIRE) >
-           monotonic_nanoseconds();
+    uint64_t now = monotonic_nanoseconds();
+    uint64_t until = __atomic_load_n(active_until, __ATOMIC_ACQUIRE);
+    if (until > now && until - now > UINT64_C(30000000000)) {
+        if (!g_last_invalid_lease_log || now - g_last_invalid_lease_log >= UINT64_C(60000000000)) {
+            log_line("LEASE_INVALID ahead_ms=%llu", (unsigned long long)((until - now) / UINT64_C(1000000)));
+            g_last_invalid_lease_log = now;
+        }
+        return 0;
+    }
+    return until > now;
 }
 
 static uint32_t requested_max_fps(const uint8_t *shared) {
@@ -238,7 +259,7 @@ static CameraMap *newest_face_slot(uint32_t after_counter,
 
 static void *stream_worker(void *unused) {
     (void)unused;
-    while (!discover_camera_maps()) {
+    while (!discover_camera_maps(1)) {
         log_line("WAITING_FOR_CAMERA_MAPS count=%zu", g_map_count);
         g_map_count = 0;
         sleep(1);
@@ -260,15 +281,27 @@ static void *stream_worker(void *unused) {
     uint64_t rejected_torn = 0;
     uint64_t next_capture_at = 0;
     uint32_t last_published_counter = 0;
+    uint32_t last_seen_newest = 0;
+    uint64_t last_counter_advance_at = 0;
+    uint64_t last_stall_log_at = 0;
+    uint64_t last_stall_rediscovery_at = 0;
+    uint64_t stall_started_at = 0;
+    int stall_active = 0;
+    int recovery_pending = 0;
     int was_active = 0;
     for (;;) {
         int active = capture_is_requested(shared);
         if (active != was_active) {
             log_line(active ? "CAPTURE_ACTIVE" : "CAPTURE_IDLE");
             if (active) {
+                (void)discover_camera_maps(0);
                 /* Discard frames accumulated while idle. The first output
                  * must carry a hardware counter newer than this baseline. */
                 last_published_counter = newest_counter();
+                last_seen_newest = last_published_counter;
+                last_counter_advance_at = monotonic_nanoseconds();
+                stall_active = 0;
+                recovery_pending = 0;
             }
             was_active = active;
         }
@@ -276,6 +309,35 @@ static void *stream_worker(void *unused) {
             next_capture_at = 0;
             usleep(20000);
             continue;
+        }
+        uint64_t heartbeat_now = monotonic_nanoseconds();
+        uint32_t observed_newest = newest_counter();
+        if (counter_is_newer(observed_newest, last_seen_newest)) {
+            last_seen_newest = observed_newest;
+            last_counter_advance_at = heartbeat_now;
+            if (stall_active) {
+                stall_active = 0;
+                recovery_pending = 1;
+            }
+        }
+        if (heartbeat_now - last_counter_advance_at >= UINT64_C(1500000000)) {
+            if (!stall_active) {
+                stall_active = 1;
+                stall_started_at = last_counter_advance_at;
+                last_stall_log_at = 0;
+                last_stall_rediscovery_at = 0;
+            }
+            if (!last_stall_log_at || heartbeat_now - last_stall_log_at >= UINT64_C(30000000000)) {
+                log_line("CAPTURE_STALL since_ms=%llu", (unsigned long long)((heartbeat_now - stall_started_at) / UINT64_C(1000000)));
+                last_stall_log_at = heartbeat_now;
+            }
+            if (!last_stall_rediscovery_at || heartbeat_now - last_stall_rediscovery_at >= UINT64_C(1500000000)) {
+                (void)discover_camera_maps(0);
+                last_published_counter = newest_counter();
+                last_seen_newest = last_published_counter;
+                last_counter_advance_at = heartbeat_now;
+                last_stall_rediscovery_at = heartbeat_now;
+            }
         }
         uint32_t max_fps = requested_max_fps(shared);
         if (max_fps) {
@@ -310,6 +372,10 @@ static void *stream_worker(void *unused) {
         last_published_counter = selected_counter;
         ++sequence;
         publish_frame(shared, sequence, second);
+        if (recovery_pending) {
+            log_line("CAPTURE_RECOVERED after_ms=%llu", (unsigned long long)((monotonic_nanoseconds() - stall_started_at) / UINT64_C(1000000)));
+            recovery_pending = 0;
+        }
         usleep(1000);
     }
 }
@@ -322,5 +388,5 @@ __attribute__((constructor)) static void start_streamer(void) {
         return;
     }
     pthread_detach(g_worker);
-    log_line("STREAMER_STARTED version=8.0 cameras=all stability=counter-guarded-double-copy provider-cap=relay-max-fps ring-order=hardware-counter lifecycle=client-lease diagnostics=torn-count");
+    log_line("STREAMER_STARTED version=9.0 cameras=all stability=counter-guarded-double-copy provider-cap=relay-max-fps ring-order=hardware-counter lifecycle=client-lease diagnostics=torn-count recovery=map-rediscovery");
 }

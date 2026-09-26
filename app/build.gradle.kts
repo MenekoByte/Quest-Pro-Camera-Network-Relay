@@ -16,7 +16,7 @@ val stageQproNativeLibraries by tasks.registering(Copy::class) {
     val nativeBuildDir = rootProject.file("native/build/android")
     val daemon = nativeBuildDir.resolve("qpro-camd")
     val injector = nativeBuildDir.resolve("questpro-camera-injector")
-    val streamer = nativeBuildDir.resolve("libquestpro-camera-streamer-v8.so")
+    val streamer = nativeBuildDir.resolve("libquestpro-camera-streamer-v12.so")
     doFirst {
         val missing = listOf(daemon, injector, streamer).filterNot { it.isFile }
         check(missing.isEmpty()) {
@@ -39,8 +39,8 @@ android {
         applicationId = "dev.monadoart.qprocamservice"
         minSdk = 34
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 10
+        versionName = "0.6.3"
         ndk { abiFilters += "arm64-v8a" }
     }
 
