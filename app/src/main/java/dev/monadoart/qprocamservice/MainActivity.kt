@@ -151,9 +151,11 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
                                 updateMessage = "Downloading update..."
                                 try {
                                     val apk = UpdateClient.download(context, release)
-                                    UpdateClient.openInstaller(context, apk)
+                                    updateMessage = "Installing update..."
+                                    val installedWithRoot = UpdateClient.installWithRoot(apk)
+                                    if (!installedWithRoot) UpdateClient.openInstaller(context, apk)
                                     updateRelease = null
-                                    updateMessage = null
+                                    updateMessage = if (installedWithRoot) "Update installed. Reopen the app." else null
                                 } catch (error: Exception) {
                                     updateMessage = "Update failed: ${error.message ?: "unknown error"}"
                                 } finally {

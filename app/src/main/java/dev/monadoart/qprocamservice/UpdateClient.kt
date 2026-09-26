@@ -67,6 +67,19 @@ object UpdateClient {
         }
     }
 
+    suspend fun installWithRoot(apk: File): Boolean {
+        val root = RootShell.run("id -u")
+        if (root.exitCode != 0 || root.stdout.trim() != "0") return false
+
+        val quotedPath = "'" + apk.absolutePath.replace("'", "'\\''") + "'"
+        val result = RootShell.run("pm install -r $quotedPath", timeoutMs = 120_000)
+        if (result.exitCode != 0) {
+            val detail = listOf(result.stdout, result.stderr).firstOrNull { it.isNotBlank() }?.trim()
+            throw IOException("Root install failed: ${detail ?: "exit code ${result.exitCode}"}")
+        }
+        return true
+    }
+
     fun openInstaller(context: Context, apk: File) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", apk)
         context.startActivity(Intent(Intent.ACTION_VIEW).apply {
