@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -25,6 +26,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -69,10 +71,31 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
     var actionInProgress by remember { mutableStateOf(false) }
     var actionLog by remember { mutableStateOf("") }
     var lanIp by remember { mutableStateOf<String?>(null) }
+    var checkingUpdates by remember { mutableStateOf(false) }
+    var downloadingUpdate by remember { mutableStateOf(false) }
+    var updateRelease by remember { mutableStateOf<AppRelease?>(null) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
     // Per-model Start/Stop, remembered across app and daemon restarts.
     val prefs = LocalContext.current.getSharedPreferences("models", Context.MODE_PRIVATE)
     var tongueEnabled by remember { mutableStateOf(prefs.getBoolean("tongue", true)) }
     var pupilEnabled by remember { mutableStateOf(prefs.getBoolean("pupil", true)) }
+
+    suspend fun checkForUpdates(manual: Boolean) {
+        checkingUpdates = true
+        if (manual) updateMessage = null
+        try {
+            val release = UpdateClient.check(appVersion)
+            updateRelease = release
+            if (manual && release == null) updateMessage = "App is up to date"
+        } catch (error: Exception) {
+            if (manual) updateMessage = "Update check failed: ${error.message ?: "unknown error"}"
+        } finally {
+            checkingUpdates = false
+        }
+    }
+
+    LaunchedEffect(appVersion) { checkForUpdates(manual = false) }
 
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -95,8 +118,64 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Quest Pro Camera Service", style = MaterialTheme.typography.headlineSmall)
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Quest Pro Camera Service",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.headlineSmall
+            )
+            Button(
+                enabled = !checkingUpdates && !downloadingUpdate,
+                onClick = { scope.launch { checkForUpdates(manual = true) } }
+            ) { Text(if (checkingUpdates) "Checking..." else "Check") }
+        }
         Text("App version: $appVersion", style = MaterialTheme.typography.bodyMedium)
+        updateMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+
+        updateRelease?.let { release ->
+            AlertDialog(
+                onDismissRequest = { if (!downloadingUpdate) updateRelease = null },
+                title = { Text("Update available") },
+                text = {
+                    Column {
+                        Text("Version ${release.version} is available. Download and install it?")
+                        updateMessage?.let { Text(it) }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = !downloadingUpdate,
+                        onClick = {
+                            if (!UpdateClient.canInstall(context)) {
+                                updateMessage = "Allow installs from this app, then tap Update again."
+                                UpdateClient.openInstallPermission(context)
+                            } else {
+                                scope.launch {
+                                    downloadingUpdate = true
+                                    updateMessage = "Downloading update..."
+                                    try {
+                                        val apk = UpdateClient.download(context, release)
+                                        UpdateClient.openInstaller(context, apk)
+                                        updateRelease = null
+                                        updateMessage = null
+                                    } catch (error: Exception) {
+                                        updateMessage = "Update failed: ${error.message ?: "unknown error"}"
+                                    } finally {
+                                        downloadingUpdate = false
+                                    }
+                                }
+                            }
+                        }
+                    ) { Text(if (downloadingUpdate) "Downloading..." else "Update") }
+                },
+                dismissButton = {
+                    TextButton(
+                        enabled = !downloadingUpdate,
+                        onClick = { updateRelease = null }
+                    ) { Text("Later") }
+                }
+            )
+        }
 
         // Running means the daemon answers /status.
         val running = status != null
