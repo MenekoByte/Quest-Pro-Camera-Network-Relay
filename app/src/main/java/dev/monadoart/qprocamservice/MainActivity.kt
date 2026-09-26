@@ -146,23 +146,18 @@ private fun CameraServiceScreen(nativeLibDir: String, appVersion: String) {
                     TextButton(
                         enabled = !downloadingUpdate,
                         onClick = {
-                            if (!UpdateClient.canInstall(context)) {
-                                updateMessage = "Allow installs from this app, then tap Update again."
-                                UpdateClient.openInstallPermission(context)
-                            } else {
-                                scope.launch {
-                                    downloadingUpdate = true
-                                    updateMessage = "Downloading update..."
-                                    try {
-                                        val apk = UpdateClient.download(context, release)
-                                        UpdateClient.openInstaller(context, apk)
-                                        updateRelease = null
-                                        updateMessage = null
-                                    } catch (error: Exception) {
-                                        updateMessage = "Update failed: ${error.message ?: "unknown error"}"
-                                    } finally {
-                                        downloadingUpdate = false
-                                    }
+                            scope.launch {
+                                downloadingUpdate = true
+                                updateMessage = "Downloading update..."
+                                try {
+                                    val apk = UpdateClient.download(context, release)
+                                    UpdateClient.openInstaller(context, apk)
+                                    updateRelease = null
+                                    updateMessage = null
+                                } catch (error: Exception) {
+                                    updateMessage = "Update failed: ${error.message ?: "unknown error"}"
+                                } finally {
+                                    downloadingUpdate = false
                                 }
                             }
                         }

@@ -2,8 +2,6 @@ package dev.monadoart.qprocamservice
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -12,15 +10,13 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 
-data class AppRelease(val version: String, val apkUrl: String, val digest: String?)
+data class AppRelease(val version: String, val apkUrl: String)
 
 object UpdateClient {
     private const val RELEASE_URL =
         "https://api.github.com/repos/MonadoArt/Quest-Pro-Camera-Network-Relay/releases/latest"
     private const val APK_NAME = "QuestProCameraService.apk"
-    private const val MAX_APK_BYTES = 150L * 1024 * 1024
 
     suspend fun check(currentVersion: String): AppRelease? = withContext(Dispatchers.IO) {
         val connection = (URL(RELEASE_URL).openConnection() as HttpURLConnection).apply {
@@ -33,29 +29,14 @@ object UpdateClient {
                 throw IOException("GitHub returned HTTP ${connection.responseCode}")
             }
             val release = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-            val tag = release.getString("tag_name")
-            val version = tag.removePrefix("v")
+            val version = release.getString("tag_name").removePrefix("v")
             if (compareVersions(version, currentVersion) <= 0) return@withContext null
             val assets = release.getJSONArray("assets")
             val asset = (0 until assets.length()).asSequence()
                 .map { assets.getJSONObject(it) }
                 .firstOrNull { it.optString("name") == APK_NAME }
                 ?: throw IOException("The latest release has no $APK_NAME asset")
-            val releasePage = URL(release.getString("html_url"))
-            val tagPath = "/releases/tag/$tag"
-            val repositoryPath = releasePage.path.removeSuffix(tagPath)
-            val apkUrl = URL(asset.getString("browser_download_url"))
-            if (releasePage.protocol != "https" || releasePage.host != "github.com" ||
-                !releasePage.path.endsWith(tagPath) ||
-                repositoryPath.split('/').filter { it.isNotEmpty() }.size != 2 ||
-                !repositoryPath.endsWith("/Quest-Pro-Camera-Network-Relay") ||
-                apkUrl.protocol != "https" || apkUrl.host != "github.com" ||
-                apkUrl.path != "$repositoryPath/releases/download/$tag/$APK_NAME" ||
-                apkUrl.query != null || apkUrl.ref != null
-            ) {
-                throw IOException("Unexpected APK download address")
-            }
-            AppRelease(version, apkUrl.toString(), asset.optString("digest").takeIf { it.startsWith("sha256:") })
+            AppRelease(version, asset.getString("browser_download_url"))
         } finally {
             connection.disconnect()
         }
@@ -72,34 +53,10 @@ object UpdateClient {
             if (connection.responseCode != HttpURLConnection.HTTP_OK) {
                 throw IOException("APK download returned HTTP ${connection.responseCode}")
             }
-            if (connection.contentLengthLong > MAX_APK_BYTES) throw IOException("APK is too large")
-            val hash = MessageDigest.getInstance("SHA-256")
-            var count = 0L
             connection.inputStream.use { input ->
                 apk.outputStream().use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        count += read
-                        if (count > MAX_APK_BYTES) throw IOException("APK is too large")
-                        hash.update(buffer, 0, read)
-                        output.write(buffer, 0, read)
-                    }
+                    input.copyTo(output)
                 }
-            }
-            if (count == 0L) throw IOException("Downloaded APK is empty")
-            val actualDigest = hash.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            if (release.digest != null && !release.digest.removePrefix("sha256:").equals(actualDigest, true)) {
-                throw IOException("APK checksum does not match the release")
-            }
-            val packageInfo = context.packageManager.getPackageArchiveInfo(apk.absolutePath, 0)
-                ?: throw IOException("Downloaded file is not an APK")
-            if (packageInfo.packageName != context.packageName) throw IOException("APK package name does not match")
-            if (packageInfo.versionName != release.version) throw IOException("APK version does not match the release")
-            val installed = context.packageManager.getPackageInfo(context.packageName, 0)
-            if (packageInfo.longVersionCode <= installed.longVersionCode) {
-                throw IOException("APK version code is not newer than the installed app")
             }
             apk
         } catch (error: Exception) {
@@ -108,14 +65,6 @@ object UpdateClient {
         } finally {
             connection.disconnect()
         }
-    }
-
-    fun canInstall(context: Context): Boolean = context.packageManager.canRequestPackageInstalls()
-
-    fun openInstallPermission(context: Context) {
-        context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-            data = Uri.parse("package:${context.packageName}")
-        })
     }
 
     fun openInstaller(context: Context, apk: File) {
