@@ -33,18 +33,29 @@ object UpdateClient {
                 throw IOException("GitHub returned HTTP ${connection.responseCode}")
             }
             val release = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-            val version = release.getString("tag_name").removePrefix("v")
+            val tag = release.getString("tag_name")
+            val version = tag.removePrefix("v")
             if (compareVersions(version, currentVersion) <= 0) return@withContext null
             val assets = release.getJSONArray("assets")
             val asset = (0 until assets.length()).asSequence()
                 .map { assets.getJSONObject(it) }
                 .firstOrNull { it.optString("name") == APK_NAME }
                 ?: throw IOException("The latest release has no $APK_NAME asset")
-            val url = asset.getString("browser_download_url")
-            if (!url.startsWith("https://github.com/MonadoArt/Quest-Pro-Camera-Network-Relay/releases/download/")) {
+            val releasePage = URL(release.getString("html_url"))
+            val tagPath = "/releases/tag/$tag"
+            val repositoryPath = releasePage.path.removeSuffix(tagPath)
+            val apkUrl = URL(asset.getString("browser_download_url"))
+            if (releasePage.protocol != "https" || releasePage.host != "github.com" ||
+                !releasePage.path.endsWith(tagPath) ||
+                repositoryPath.split('/').filter { it.isNotEmpty() }.size != 2 ||
+                !repositoryPath.endsWith("/Quest-Pro-Camera-Network-Relay") ||
+                apkUrl.protocol != "https" || apkUrl.host != "github.com" ||
+                apkUrl.path != "$repositoryPath/releases/download/$tag/$APK_NAME" ||
+                apkUrl.query != null || apkUrl.ref != null
+            ) {
                 throw IOException("Unexpected APK download address")
             }
-            AppRelease(version, url, asset.optString("digest").takeIf { it.startsWith("sha256:") })
+            AppRelease(version, apkUrl.toString(), asset.optString("digest").takeIf { it.startsWith("sha256:") })
         } finally {
             connection.disconnect()
         }
